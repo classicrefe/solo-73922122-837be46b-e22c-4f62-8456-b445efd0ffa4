@@ -105,4 +105,49 @@ echo
 echo "== cancelling the already succeeded task -> HTTP 409 =="
 curl -s -o /dev/null -w '%{http_code}\n' -X POST "$BASE_URL/tasks/$ID/cancel"
 
+echo "== molecular consensus: UMI families -> ZIP with R1/R2 =="
+# Build a consensus-valid task (40 bp reads, Phred 0-40) and merge the delta
+# family (1 read) into gamma (2 reads; UMI one substitution apart, size at
+# least twice).  epsilon stays a family of its own.
+CONS_R1="$WORK/cons_R1.fastq"; CONS_R2="$WORK/cons_R2.fastq"
+python3 - "$CONS_R1" "$CONS_R2" <<'PY'
+import sys
+seqs = {"gamma": b"A" * 40, "delta": b"G" * 40, "epsilon": b"T" * 40}
+with open(sys.argv[1], "wb") as f1, open(sys.argv[2], "wb") as f2:
+    for rid, seq in seqs.items():
+        f1.write(b"@%s/1\n%s\n+\n%s\n" % (rid.encode(), seq, b"I" * 40))
+        f2.write(b"@%s/2\n%s\n+\n%s\n" % (rid.encode(), b"C" * 40, b"I" * 40))
+PY
+CONS=$(curl -fsS -X POST "$BASE_URL/tasks" \
+  -F "r1=@$CONS_R1;filename=R1.fastq" \
+  -F "r2=@$CONS_R2;filename=R2.fastq")
+CONS_ID=$(python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])' <<<"$CONS")
+for _ in 1 2 3 4 5 6 7 8 9 10; do
+  S=$(curl -fsS "$BASE_URL/tasks/$CONS_ID" |
+      python3 -c 'import json,sys; print(json.load(sys.stdin)["status"])')
+  [ "$S" = "succeeded" ] && break
+  sleep 0.3
+done
+curl -fsS -X POST "$BASE_URL/tasks/$CONS_ID/consensus" \
+  -H 'Content-Type: application/json' \
+  -d '{"reads":[
+        {"read_id":"gamma","umi":"CCCCCCCC","start":200},
+        {"read_id":"delta","umi":"CCCCCCCA","start":200},
+        {"read_id":"epsilon","umi":"GGGGGGGG","start":300}]}' \
+  -o "$WORK/consensus.zip"
+python3 - "$WORK/consensus.zip" <<'PY'
+import sys, zipfile
+zf = zipfile.ZipFile(sys.argv[1])
+assert sorted(zf.namelist()) == ["R1.fastq", "R2.fastq"], zf.namelist()
+for name in zf.namelist():
+    print(name, "->", zf.read(name).decode().splitlines()[0])
+print("OK: consensus ZIP has R1.fastq and R2.fastq")
+PY
+
+echo "== consensus request that omits a read id is rejected as a whole (422) =="
+curl -s -X POST "$BASE_URL/tasks/$CONS_ID/consensus" \
+  -H 'Content-Type: application/json' \
+  -d '{"reads":[{"read_id":"gamma","umi":"CCCCCCCC","start":200}]}' \
+  -o /dev/null -w '%{http_code}\n'
+
 echo "ALL DEMO STEPS DONE"

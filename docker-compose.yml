@@ -1,7 +1,7 @@
 services:
   fastq-pairer:
     build: .
-    image: fastq-pairer:1.0.0
+    image: fastq-pairer:1.1.0
     ports:
       - "8000:8000"
     environment:

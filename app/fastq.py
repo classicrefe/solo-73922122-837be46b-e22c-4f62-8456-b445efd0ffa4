@@ -47,11 +47,32 @@ def extract_read_id(header_line: bytes) -> str:
     return first_field.decode("latin-1")
 
 
-def _iter_raw_records(path: Path, side_label: str) -> Iterator[tuple[bytes, bytes, bytes, bytes]]:
+def _readline(fh, side_label: str, max_line_bytes: int | None) -> bytes:
+    """Read one line, optionally rejecting lines beyond a byte bound.
+
+    The bound is used by readers that must stay in memory regardless of file
+    size.  At most ``max_line_bytes + 2`` bytes are read, so a line longer
+    than the bound is detected without loading the rest of it.
+    """
+    if max_line_bytes is None:
+        return fh.readline()
+    # Reading at most max+2 bytes means a longer line is always detected;
+    # only a truncated prefix is ever held in memory.
+    line = fh.readline(max_line_bytes + 2)
+    if len(line) > max_line_bytes:
+        raise FastqFormatError(
+            f"{side_label}: line exceeds {max_line_bytes} bytes"
+        )
+    return line
+
+
+def _iter_raw_records(
+    path: Path, side_label: str, max_line_bytes: int | None = None
+) -> Iterator[tuple[bytes, bytes, bytes, bytes]]:
     with path.open("rb") as fh:
         record_no = 0
         while True:
-            lines = [fh.readline(), fh.readline(), fh.readline(), fh.readline()]
+            lines = [_readline(fh, side_label, max_line_bytes) for _ in range(4)]
             if not lines[0]:
                 # EOF: the other three must be empty too.
                 if any(lines[1:]):

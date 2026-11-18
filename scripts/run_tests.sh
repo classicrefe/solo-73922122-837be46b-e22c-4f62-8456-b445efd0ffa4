@@ -15,4 +15,8 @@ echo "=== cancel/complete arbitration tests ==="
 "$PY" -I tests/test_cancel_race.py
 
 echo
+echo "=== molecular consensus API tests ==="
+"$PY" -I tests/test_consensus.py
+
+echo
 echo "ALL SHORT SELF-TESTS PASSED"

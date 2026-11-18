@@ -9,10 +9,11 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, File, HTTPException, UploadFile, status
-from fastapi.responses import FileResponse, JSONResponse
-from pydantic import BaseModel
+from fastapi.responses import FileResponse, JSONResponse, Response
+from pydantic import BaseModel, Field, StrictInt
 
-from . import config, db, worker
+from . import config, consensus, db, worker
+from .consensus import ConsensusError, ReadMeta
 from .worker import UploadTooLarge, start_worker, task_dir
 
 
@@ -25,11 +26,13 @@ async def lifespan(_: FastAPI):
 
 app = FastAPI(
     title="Paired FASTQ Service",
-    version="1.0.0",
+    version="1.1.0",
     description=(
         "Upload shuffled paired-end FASTQ files (R1/R2, uncompressed, "
         "max 256 MiB each). The service re-pairs them by read id, delivers "
-        "both mates in R1 order and preserves the original bytes."
+        "both mates in R1 order and preserves the original bytes. For a "
+        "succeeded task, POST /tasks/{id}/consensus builds UMI-family "
+        "molecular consensus R1/R2 FASTQ files and returns one ZIP."
     ),
     lifespan=lifespan,
 )
@@ -232,3 +235,57 @@ def download_r2(task_id: str) -> FileResponse:
 @app.get("/health")
 def health() -> JSONResponse:
     return JSONResponse({"status": "ok"})
+
+
+class ConsensusReadIn(BaseModel):
+    read_id: str = Field(..., description="Read id as published in the task R1/R2")
+    umi: str = Field(..., description="8 bases over A/C/G/T")
+    start: StrictInt = Field(..., description="Non-negative reference fragment start")
+
+
+class ConsensusRequest(BaseModel):
+    reads: list[ConsensusReadIn] = Field(
+        ...,
+        description=(
+            "One entry per read pair of the succeeded task; must cover every "
+            "read id exactly once (max 500 entries)"
+        ),
+    )
+
+
+@app.post(
+    "/tasks/{task_id}/consensus",
+    summary="Build UMI molecular consensus FASTQs (ZIP)",
+    response_class=Response,
+    responses={
+        200: {"content": {"application/zip": {}},
+              "description": "ZIP with R1.fastq and R2.fastq"},
+        404: {"description": "Unknown task"},
+        409: {"description": "Task not succeeded / results missing or corrupt"},
+        422: {"description": "Invalid reads metadata or read constraints violated"},
+    },
+)
+def consensus_task(task_id: str, request: ConsensusRequest) -> Response:
+    # Every validation error aborts the whole request: nothing is written and
+    # the task's original result files are never modified.
+    conn = db.connect()
+    try:
+        entries = [
+            ReadMeta(read_id=item.read_id, umi=item.umi, start=item.start)
+            for item in request.reads
+        ]
+        payload = consensus.build_consensus_zip(conn, task_id, entries)
+    except ConsensusError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.message)
+    finally:
+        conn.close()
+
+    return Response(
+        content=payload,
+        media_type="application/zip",
+        headers={
+            "Content-Disposition": (
+                f'attachment; filename="consensus-{task_id}.zip"'
+            )
+        },
+    )
